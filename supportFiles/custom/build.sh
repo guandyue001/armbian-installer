@@ -1,15 +1,15 @@
 #!/bin/bash
-# Based from https://willhaley.com/blog/custom-debian-live-environment/
+# Modified for ARM64 (Apple Silicon: M1/M2/M3/M4)
 
 echo Install required tools
 apt-get update
-apt-get -y install debootstrap squashfs-tools xorriso isolinux syslinux-efi  grub-pc-bin grub-efi-amd64-bin mtools dosfstools parted
+apt-get -y install debootstrap squashfs-tools xorriso grub-efi-arm64-bin mtools dosfstools parted
 
 echo Create directory where we will make the image
 mkdir -p $HOME/LIVE_BOOT
 
-echo Install Debian
-debootstrap --arch=amd64 --variant=minbase buster $HOME/LIVE_BOOT/chroot http://ftp.us.debian.org/debian/
+echo Install Debian for ARM64
+debootstrap --arch=arm64 --variant=minbase buster $HOME/LIVE_BOOT/chroot http://ftp.us.debian.org/debian/
 
 echo Copy supporting documents into the chroot
 cp -v /supportFiles/installChroot.sh $HOME/LIVE_BOOT/chroot/installChroot.sh
@@ -44,7 +44,7 @@ umount $HOME/LIVE_BOOT/chroot/dev
 umount $HOME/LIVE_BOOT/chroot/sys
 
 echo Create directories that will contain files for our live environment files and scratch files.
-mkdir -p $HOME/LIVE_BOOT/{staging/{EFI/boot,boot/grub/x86_64-efi,isolinux,live},tmp}
+mkdir -p $HOME/LIVE_BOOT/{staging/{EFI/boot,boot/grub/arm64-efi,live},tmp}
 
 echo Compress the chroot environment into a Squash filesystem.
 cp /mnt/custom.img ${HOME}/LIVE_BOOT/chroot/mnt/
@@ -56,40 +56,30 @@ cp -v $HOME/LIVE_BOOT/chroot/boot/vmlinuz-* $HOME/LIVE_BOOT/staging/live/vmlinuz
 cp -v $HOME/LIVE_BOOT/chroot/boot/initrd.img-* $HOME/LIVE_BOOT/staging/live/initrd
 
 echo Copy boot config files
-cp -v /supportFiles/custom/isolinux.cfg $HOME/LIVE_BOOT/staging/isolinux/isolinux.cfg
 cp -v /supportFiles/custom/grub.cfg $HOME/LIVE_BOOT/staging/boot/grub/grub.cfg
 cp -v /supportFiles/grub-standalone.cfg $HOME/LIVE_BOOT/tmp/grub-standalone.cfg
 touch $HOME/LIVE_BOOT/staging/DEBIAN_CUSTOM
 
-echo Copy boot images
-cp -v /usr/lib/ISOLINUX/isolinux.bin "${HOME}/LIVE_BOOT/staging/isolinux/"
-cp -v /usr/lib/syslinux/modules/bios/* "${HOME}/LIVE_BOOT/staging/isolinux/"
-cp -v -r /usr/lib/grub/x86_64-efi/* "${HOME}/LIVE_BOOT/staging/boot/grub/x86_64-efi/"
+echo Copy GRUB ARM64 modules
+cp -v -r /usr/lib/grub/arm64-efi/* "${HOME}/LIVE_BOOT/staging/boot/grub/arm64-efi/"
 
-echo Make UEFI grub files
-grub-mkstandalone --format=x86_64-efi --output=$HOME/LIVE_BOOT/tmp/bootx64.efi --locales=""  --fonts="" "boot/grub/grub.cfg=$HOME/LIVE_BOOT/tmp/grub-standalone.cfg"
+echo Make UEFI grub standalone image (ARM64)
+grub-mkstandalone --format=arm64-efi --output=$HOME/LIVE_BOOT/tmp/bootaa64.efi --locales=""  --fonts="" "boot/grub/grub.cfg=$HOME/LIVE_BOOT/tmp/grub-standalone.cfg"
 
 cd $HOME/LIVE_BOOT/staging/EFI/boot
-SIZE=`expr $(stat --format=%s $HOME/LIVE_BOOT/tmp/bootx64.efi) + 65536`
+SIZE=`expr $(stat --format=%s $HOME/LIVE_BOOT/tmp/bootaa64.efi) + 65536`
 dd if=/dev/zero of=efiboot.img bs=$SIZE count=1
 /sbin/mkfs.vfat efiboot.img
 mmd -i efiboot.img efi efi/boot
-mcopy -vi efiboot.img $HOME/LIVE_BOOT/tmp/bootx64.efi ::efi/boot/
+mcopy -vi efiboot.img $HOME/LIVE_BOOT/tmp/bootaa64.efi ::efi/boot/
 
-echo Build ISO
+echo Build ARM64 UEFI-only ISO
 xorriso \
     -as mkisofs \
     -iso-level 3 \
-    -o "${HOME}/LIVE_BOOT/debian-custom.iso" \
+    -o "${HOME}/LIVE_BOOT/debian-custom-arm64.iso" \
     -full-iso9660-filenames \
-    -volid "DEBIAN_CUSTOM" \
-    -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
-    -eltorito-boot \
-        isolinux/isolinux.bin \
-        -no-emul-boot \
-        -boot-load-size 4 \
-        -boot-info-table \
-        --eltorito-catalog isolinux/isolinux.cat \
+    -volid "DEBIAN_CUSTOM_ARM64" \
     -eltorito-alt-boot \
         -e /EFI/boot/efiboot.img \
         -no-emul-boot \
@@ -98,6 +88,6 @@ xorriso \
     "${HOME}/LIVE_BOOT/staging"
 
 echo Copy output
-cp -v $HOME/LIVE_BOOT/debian-custom.iso /output/custom-installer-x86_64.iso
-chmod -v 666 /output/custom-installer-x86_64.iso
+cp -v $HOME/LIVE_BOOT/debian-custom-arm64.iso /output/custom-installer-arm64.iso
+chmod -v 666 /output/custom-installer-arm64.iso
 ls -lah /output
