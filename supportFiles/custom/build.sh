@@ -1,93 +1,96 @@
 #!/bin/bash
-# Modified for ARM64 (Apple Silicon: M1/M2/M3/M4)
+set -e
 
-echo Install required tools
+echo "📦 安装所需工具..."
 apt-get update
-apt-get -y install debootstrap squashfs-tools xorriso grub-efi-arm64-bin mtools dosfstools parted
+apt-get install -y curl wget debootstrap squashfs-tools xorriso grub-efi-arm64-bin mtools dosfstools parted
 
-echo Create directory where we will make the image
-mkdir -p $HOME/LIVE_BOOT
+echo "📁 创建工作目录..."
+WORKDIR="$HOME/LIVE_BOOT"
+CHROOT="$WORKDIR/chroot"
+mkdir -p "$WORKDIR" "$CHROOT" "$WORKDIR/output"
 
-echo Install Debian for ARM64
-debootstrap --arch=arm64 --variant=minbase buster $HOME/LIVE_BOOT/chroot http://ftp.us.debian.org/debian/
+echo "🌐 下载 OpenWrt 镜像..."
+IMG_URL="https://downloads.openwrt.org/releases/24.10.1/targets/armsr/armv8/openwrt-24.10.1-armsr-armv8-generic-squashfs-combined-efi.img.gz"
+IMG_PATH="$WORKDIR/openwrt.img.gz"
+curl -L "$IMG_URL" -o "$IMG_PATH"
+gunzip -c "$IMG_PATH" > "$WORKDIR/custom.img"
 
-echo Copy supporting documents into the chroot
-cp -v /supportFiles/installChroot.sh $HOME/LIVE_BOOT/chroot/installChroot.sh
-cp -v /supportFiles/custom/ddd $HOME/LIVE_BOOT/chroot/usr/bin/ddd
-chmod +x $HOME/LIVE_BOOT/chroot/usr/bin/ddd
-cp -v /supportFiles/sources.list $HOME/LIVE_BOOT/chroot/etc/apt/sources.list
+echo "📥 安装 Debian 到 chroot (ARM64)..."
+debootstrap --arch=arm64 --variant=minbase buster "$CHROOT" http://ftp.us.debian.org/debian/
 
-echo Mounting dev / proc / sys
-mount -t proc none $HOME/LIVE_BOOT/chroot/proc
-mount -o bind /dev $HOME/LIVE_BOOT/chroot/dev
-mount -o bind /sys $HOME/LIVE_BOOT/chroot/sys
+echo "🗂️ 拷贝支持文件..."
+cp -v /supportFiles/installChroot.sh "$CHROOT/installChroot.sh"
+cp -v /supportFiles/custom/ddd "$CHROOT/usr/bin/ddd"
+chmod +x "$CHROOT/usr/bin/ddd"
+cp -v /supportFiles/sources.list "$CHROOT/etc/apt/sources.list"
+cp -v /supportFiles/99-dhcp-en.network "$CHROOT/etc/systemd/network/99-dhcp-en.network"
+mkdir -p "$CHROOT/etc/systemd/system/getty@tty1.service.d/"
+cp -v /supportFiles/override.conf "$CHROOT/etc/systemd/system/getty@tty1.service.d/override.conf"
 
-echo Run install script inside chroot
-chroot $HOME/LIVE_BOOT/chroot /installChroot.sh
+echo "🔗 挂载 dev/proc/sys..."
+mount -t proc none "$CHROOT/proc"
+mount -o bind /dev "$CHROOT/dev"
+mount -o bind /sys "$CHROOT/sys"
 
-echo Cleanup chroot
-rm -v $HOME/LIVE_BOOT/chroot/installChroot.sh
-mv -v $HOME/LIVE_BOOT/chroot/packages.txt /output/packages.txt
+echo "🚀 执行 chroot 配置..."
+chroot "$CHROOT" /installChroot.sh
 
-echo Copy in systemd-networkd config
-cp -v /supportFiles/99-dhcp-en.network $HOME/LIVE_BOOT/chroot/etc/systemd/network/99-dhcp-en.network
-chown -v root:root $HOME/LIVE_BOOT/chroot/etc/systemd/network/99-dhcp-en.network
-chmod -v 644 $HOME/LIVE_BOOT/chroot/etc/systemd/network/99-dhcp-en.network
+echo "🧹 清理 chroot..."
+rm -v "$CHROOT/installChroot.sh"
+mv -v "$CHROOT/packages.txt" "$WORKDIR/output/packages.txt"
 
-echo Enable autologin
-mkdir -p -v $HOME/LIVE_BOOT/chroot/etc/systemd/system/getty@tty1.service.d/
-cp -v /supportFiles/override.conf $HOME/LIVE_BOOT/chroot/etc/systemd/system/getty@tty1.service.d/override.conf
+echo "📁 创建输出 staging 目录..."
+mkdir -p "$WORKDIR/staging/EFI/boot"
+mkdir -p "$WORKDIR/staging/boot/grub/arm64-efi"
+mkdir -p "$WORKDIR/staging/live"
+mkdir -p "$WORKDIR/tmp"
 
-echo Unmounting dev / proc / sys
-umount $HOME/LIVE_BOOT/chroot/proc
-umount $HOME/LIVE_BOOT/chroot/dev
-umount $HOME/LIVE_BOOT/chroot/sys
+echo "📦 打包 squashfs..."
+mkdir -p "$CHROOT/mnt"
+cp "$WORKDIR/custom.img" "$CHROOT/mnt/"
+mksquashfs "$CHROOT" "$WORKDIR/staging/live/filesystem.squashfs" -e boot
 
-echo Create directories that will contain files for our live environment files and scratch files.
-mkdir -p $HOME/LIVE_BOOT/{staging/{EFI/boot,boot/grub/arm64-efi,live},tmp}
+echo "📤 拷贝 kernel 和 initrd..."
+cp -v "$CHROOT"/boot/vmlinuz-* "$WORKDIR/staging/live/vmlinuz"
+cp -v "$CHROOT"/boot/initrd.img-* "$WORKDIR/staging/live/initrd"
 
-echo Compress the chroot environment into a Squash filesystem.
-cp /mnt/custom.img ${HOME}/LIVE_BOOT/chroot/mnt/
-ls ${HOME}/LIVE_BOOT/chroot/mnt/
-mksquashfs $HOME/LIVE_BOOT/chroot $HOME/LIVE_BOOT/staging/live/filesystem.squashfs -e boot
+echo "📄 拷贝 GRUB 配置文件..."
+cp -v /supportFiles/custom/grub.cfg "$WORKDIR/staging/boot/grub/grub.cfg"
+cp -v /supportFiles/grub-standalone.cfg "$WORKDIR/tmp/grub-standalone.cfg"
+touch "$WORKDIR/staging/DEBIAN_CUSTOM"
 
-echo Copy kernel and initrd
-cp -v $HOME/LIVE_BOOT/chroot/boot/vmlinuz-* $HOME/LIVE_BOOT/staging/live/vmlinuz
-cp -v $HOME/LIVE_BOOT/chroot/boot/initrd.img-* $HOME/LIVE_BOOT/staging/live/initrd
+echo "🧩 拷贝 GRUB ARM64 模块..."
+cp -v -r /usr/lib/grub/arm64-efi/* "$WORKDIR/staging/boot/grub/arm64-efi/"
 
-echo Copy boot config files
-cp -v /supportFiles/custom/grub.cfg $HOME/LIVE_BOOT/staging/boot/grub/grub.cfg
-cp -v /supportFiles/grub-standalone.cfg $HOME/LIVE_BOOT/tmp/grub-standalone.cfg
-touch $HOME/LIVE_BOOT/staging/DEBIAN_CUSTOM
+echo "⚙️ 构建 GRUB standalone EFI..."
+grub-mkstandalone --format=arm64-efi --output="$WORKDIR/tmp/bootaa64.efi" --locales="" --fonts="" \
+    "boot/grub/grub.cfg=$WORKDIR/tmp/grub-standalone.cfg"
 
-echo Copy GRUB ARM64 modules
-cp -v -r /usr/lib/grub/arm64-efi/* "${HOME}/LIVE_BOOT/staging/boot/grub/arm64-efi/"
-
-echo Make UEFI grub standalone image (ARM64)
-grub-mkstandalone --format=arm64-efi --output=$HOME/LIVE_BOOT/tmp/bootaa64.efi --locales=""  --fonts="" "boot/grub/grub.cfg=$HOME/LIVE_BOOT/tmp/grub-standalone.cfg"
-
-cd $HOME/LIVE_BOOT/staging/EFI/boot
-SIZE=`expr $(stat --format=%s $HOME/LIVE_BOOT/tmp/bootaa64.efi) + 65536`
+echo "💾 制作 UEFI EFI 镜像..."
+cd "$WORKDIR/staging/EFI/boot"
+SIZE=$(expr $(stat --format=%s "$WORKDIR/tmp/bootaa64.efi") + 65536)
 dd if=/dev/zero of=efiboot.img bs=$SIZE count=1
-/sbin/mkfs.vfat efiboot.img
+mkfs.vfat efiboot.img
 mmd -i efiboot.img efi efi/boot
-mcopy -vi efiboot.img $HOME/LIVE_BOOT/tmp/bootaa64.efi ::efi/boot/
+mcopy -vi efiboot.img "$WORKDIR/tmp/bootaa64.efi" ::efi/boot/
 
-echo Build ARM64 UEFI-only ISO
-xorriso \
-    -as mkisofs \
+echo "📀 构建最终 ARM64 ISO..."
+xorriso -as mkisofs \
     -iso-level 3 \
-    -o "${HOME}/LIVE_BOOT/debian-custom-arm64.iso" \
+    -o "$WORKDIR/debian-custom-arm64.iso" \
     -full-iso9660-filenames \
     -volid "DEBIAN_CUSTOM_ARM64" \
     -eltorito-alt-boot \
-        -e /EFI/boot/efiboot.img \
-        -no-emul-boot \
-        -isohybrid-gpt-basdat \
-    -append_partition 2 0xef ${HOME}/LIVE_BOOT/staging/EFI/boot/efiboot.img \
-    "${HOME}/LIVE_BOOT/staging"
+    -e /EFI/boot/efiboot.img \
+    -no-emul-boot \
+    -isohybrid-gpt-basdat \
+    -append_partition 2 0xef "$WORKDIR/staging/EFI/boot/efiboot.img" \
+    "$WORKDIR/staging"
 
-echo Copy output
-cp -v $HOME/LIVE_BOOT/debian-custom-arm64.iso /output/custom-installer-arm64.iso
+echo "📤 复制输出..."
+cp -v "$WORKDIR/debian-custom-arm64.iso" /output/custom-installer-arm64.iso
 chmod -v 666 /output/custom-installer-arm64.iso
 ls -lah /output
+
+echo "✅ 构建完成!"
